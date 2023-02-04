@@ -1,4 +1,4 @@
-module github.com/auth-server/jwt
+module github.com/sohamkamani/jwt-go-example
 
 go 1.16
 

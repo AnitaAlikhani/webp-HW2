@@ -19,6 +19,7 @@ func main() {
 	http.HandleFunc("/signup", SignUp)
 	http.HandleFunc("/signin", Signin)
 	http.HandleFunc("/info", Info)
+	http.HandleFunc("/refresh-token", RefreshToken)
 	http.HandleFunc("/logout", Logout)
 
 	initRedisFromInvalidTokens()
@@ -63,11 +64,14 @@ type Claims struct {
 	FirstName string `json:"firstName"`
 	LastName string `json:"lastName"`
 	Gender string `json:"gender"`
+	CType string `json:"token_type"`
 	jwt.RegisteredClaims
 }
 
 type LoginResponse struct {
 	TokenString string `json:"token"`
+	RefreshTokenString string `json:"refresh_token"`
+
 }
 
 type ErrorMessage struct {
@@ -76,6 +80,7 @@ type ErrorMessage struct {
 
 func SignUp(w http.ResponseWriter, r *http.Request) {
 	var creds SignUpUser
+
 	err := json.NewDecoder(r.Body).Decode(&creds)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -111,6 +116,7 @@ func SignUp(w http.ResponseWriter, r *http.Request) {
 	creds.Id = inserUserInDataBase(creds);
 
 	expirationTime := time.Now().Add(5 * time.Minute)
+	refreshTokenExpirationTime := time.Now().Add(60 * 5 * time.Minute)
 
 	claims := &Claims{
 		Id: creds.Id,
@@ -119,6 +125,7 @@ func SignUp(w http.ResponseWriter, r *http.Request) {
 		Gender: creds.Gender,
 		FirstName: creds.FirstName,
 		LastName: creds.LastName,
+		CType: "accessToken",
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
 		},
@@ -134,8 +141,34 @@ func SignUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+
+	refreshClaims := &Claims{
+		Id: creds.Id,
+		Email: creds.Email,
+		PhoneNumber: creds.PhoneNumber,
+		Gender: creds.Gender,
+		FirstName: creds.FirstName,
+		LastName: creds.LastName,
+		CType: "refreshToken",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(refreshTokenExpirationTime),
+		},
+	}
+
+
+	refreshToken := jwt.NewWithClaims(jwt.SigningMethodHS256, refreshClaims)
+
+	refreshTokenString, err := refreshToken.SignedString(jwtKey)
+	if err != nil {
+
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+
 	var responseBody LoginResponse
 	responseBody.TokenString = tokenString
+	responseBody.RefreshTokenString = refreshTokenString
 	w.Header().Set("Content-Type", "application/json")
 
 	json.NewEncoder(w).Encode(responseBody)
@@ -164,6 +197,8 @@ func Signin(w http.ResponseWriter, r *http.Request) {
 
 
 	expirationTime := time.Now().Add(5 * time.Minute)
+	refreshTokenExpirationTime := time.Now().Add(60 * 5 * time.Minute)
+
 	claims := &Claims{
 		Id: existedUser.Id,
 		Email: existedUser.Email,
@@ -171,6 +206,7 @@ func Signin(w http.ResponseWriter, r *http.Request) {
 		Gender:existedUser.Gender,
 		FirstName: existedUser.FirstName,
 		LastName: existedUser.LastName,
+		CType: "accessToken",
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
 		},
@@ -186,8 +222,33 @@ func Signin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+
+	refreshClaims  := &Claims{
+		Id: existedUser.Id,
+		Email: existedUser.Email,
+		PhoneNumber: existedUser.PhoneNumber,
+		Gender:existedUser.Gender,
+		FirstName: existedUser.FirstName,
+		LastName: existedUser.LastName,
+		CType: "refreshToken",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(refreshTokenExpirationTime),
+		},
+	}
+
+
+	refreshToken := jwt.NewWithClaims(jwt.SigningMethodHS256, refreshClaims)
+
+	refreshTokenString, err := refreshToken.SignedString(jwtKey)
+	if err != nil {
+
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	var responseBody LoginResponse
 	responseBody.TokenString = tokenString
+	responseBody.RefreshTokenString = refreshTokenString
 	w.Header().Set("Content-Type", "application/json")
 
 	json.NewEncoder(w).Encode(responseBody)
@@ -225,6 +286,11 @@ func Info(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
+	if  claims.CType == "refreshToken" {
+		w.WriteHeader(http.StatusUnauthorized)
+
+		return
+	}
 
 	var userResponse User
 	userResponse.UserId = claims.Id
@@ -237,6 +303,103 @@ func Info(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	json.NewEncoder(w).Encode(userResponse)
+}
+
+func RefreshToken(w http.ResponseWriter, r *http.Request) {
+
+	c := r.Header.Get("refreshToken")
+	if c == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	if readFromRedis(c) == "invalid" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	tknStr := c
+
+	claims := &Claims{}
+
+	tkn, err := jwt.ParseWithClaims(tknStr, claims, func(token *jwt.Token) (interface{}, error) {
+		return jwtKey, nil
+	})
+	if err != nil {
+		if err == jwt.ErrSignatureInvalid {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if !tkn.Valid {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if  claims.CType != "refreshToken" {
+		w.WriteHeader(http.StatusUnauthorized)
+
+		return
+	}
+
+
+	expirationTime := time.Now().Add(5 * time.Minute)
+	refreshTokenExpirationTime := time.Now().Add(60 * 5 * time.Minute)
+
+	newClaims := &Claims{
+		Id: claims.Id,
+		Email: claims.Email,
+		PhoneNumber: claims.PhoneNumber,
+		Gender:claims.Gender,
+		FirstName: claims.FirstName,
+		LastName: claims.LastName,
+		CType: "accessToken",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expirationTime),
+		},
+	}
+
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, newClaims)
+
+	tokenString, err := token.SignedString(jwtKey)
+	if err != nil {
+
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+
+	refreshClaims  := &Claims{
+		Id: claims.Id,
+		Email: claims.Email,
+		PhoneNumber: claims.PhoneNumber,
+		Gender:claims.Gender,
+		FirstName: claims.FirstName,
+		LastName: claims.LastName,
+		CType: "refreshToken",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(refreshTokenExpirationTime),
+		},
+	}
+
+
+	refreshToken := jwt.NewWithClaims(jwt.SigningMethodHS256, refreshClaims)
+
+	refreshTokenString, err := refreshToken.SignedString(jwtKey)
+	if err != nil {
+
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	var responseBody LoginResponse
+	responseBody.TokenString = tokenString
+	responseBody.RefreshTokenString = refreshTokenString
+	w.Header().Set("Content-Type", "application/json")
+
+	json.NewEncoder(w).Encode(responseBody)
 }
 
 func Logout(w http.ResponseWriter, r *http.Request) {
@@ -276,8 +439,8 @@ func Logout(w http.ResponseWriter, r *http.Request) {
 const (
 	host     = "localhost"
 	port     = 5432
-	user     = "authserver"
-	password = "authserver"
+	user     = "username"
+	password = "password"
 	dbname   = "auth"
 )
   
